@@ -1,0 +1,198 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ---------- 用户与住户 ----------
+
+model User {
+  id        String    @id @default(cuid())
+  username  String    @unique
+  name      String
+  role      String // RESIDENT | AGENT（SQLite 不支持 enum，代码层校验）
+  resident  Resident?
+  createdAt DateTime  @default(now())
+}
+
+model Resident {
+  id            String         @id @default(cuid())
+  accountNo     String         @unique
+  address       String
+  userId        String         @unique
+  user          User           @relation(fields: [userId], references: [id])
+  meters        Meter[]
+  bills         Bill[]
+  disputes      Dispute[]
+  ledgerEntries LedgerEntry[]
+  notifications Notification[]
+}
+
+// ---------- 表计与抄表 ----------
+
+model Meter {
+  id         String         @id @default(cuid())
+  meterNo    String         @unique
+  residentId String
+  resident   Resident       @relation(fields: [residentId], references: [id])
+  readings   MeterReading[]
+  bills      Bill[]
+  receipts   MeterReceipt[]
+}
+
+model MeterReading {
+  id           String        @id @default(cuid())
+  meterId      String
+  meter        Meter         @relation(fields: [meterId], references: [id])
+  date         DateTime // 抄表时点（一般为账期末）
+  value        Int // 累计读数 m³
+  kind         String // ACTUAL 实抄 | ESTIMATED 估抄
+  source       String        @default("ROUTINE") // ROUTINE 周期抄表 | REVIEW 复核
+  photoToken   String? // 原始抄表照片令牌（复核更正读数复用回执照片）
+  supersedesId String?       @unique // 复核更正读数 → 指向被更正的估抄读数
+  supersedes   MeterReading? @relation("Correction", fields: [supersedesId], references: [id])
+  supersededBy MeterReading? @relation("Correction")
+  receiptNo    String? // 复核回执号
+  createdAt    DateTime      @default(now())
+
+  @@index([meterId, date])
+}
+
+// ---------- 账单（快照，复核调整后原账单保留不变） ----------
+
+model Bill {
+  id              String           @id @default(cuid())
+  residentId      String
+  resident        Resident         @relation(fields: [residentId], references: [id])
+  meterId         String
+  meter           Meter            @relation(fields: [meterId], references: [id])
+  period          String // 账期 yyyy-MM
+  startValue      Int
+  endValue        Int
+  usage           Int
+  unitPrice       Float
+  amount          Float
+  status          String           @default("UNPAID") // UNPAID | PAID
+  startReadingId  String
+  endReadingId    String
+  issuedAt        DateTime         @default(now())
+  disputes        Dispute[]
+  adjustmentLines AdjustmentLine[]
+  ledgerEntries   LedgerEntry[]
+
+  @@unique([meterId, period])
+  @@index([residentId])
+}
+
+// ---------- 异议与复核 ----------
+
+model Dispute {
+  id          String         @id @default(cuid())
+  billId      String
+  bill        Bill           @relation(fields: [billId], references: [id])
+  residentId  String
+  resident    Resident       @relation(fields: [residentId], references: [id])
+  reason      String
+  status      String         @default("SUBMITTED") // SUBMITTED | REVIEW_SCHEDULED | CONCLUSION_REACHED | CLOSED
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+  events      DisputeEvent[]
+  reviewTask  ReviewTask?
+  adjustments Adjustment[]
+
+  @@index([residentId])
+}
+
+model DisputeEvent {
+  id        String   @id @default(cuid())
+  disputeId String
+  dispute   Dispute  @relation(fields: [disputeId], references: [id])
+  actorName String
+  action    String // SUBMIT | SCHEDULE | ISSUE_ADJUSTMENT | NO_ERROR | RESIDENT_ACCEPT | RESIDENT_REJECT
+  note      String?
+  createdAt DateTime @default(now())
+
+  @@index([disputeId])
+}
+
+model ReviewTask {
+  id           String    @id @default(cuid())
+  disputeId    String    @unique
+  dispute      Dispute   @relation(fields: [disputeId], references: [id])
+  assigneeName String?
+  scheduledAt  DateTime?
+  createdAt    DateTime  @default(now())
+  completedAt  DateTime?
+}
+
+// 模拟抄表机接口返回的现场复核回执；receiptNo 全局唯一，消费后不可再次调整
+model MeterReceipt {
+  id                     String   @id @default(cuid())
+  receiptNo              String   @unique
+  meterId                String
+  meter                  Meter    @relation(fields: [meterId], references: [id])
+  value                  Int // 现场实抄读数
+  takenAt                DateTime
+  photoToken             String   @unique
+  consumedByAdjustmentId String?  @unique
+  createdAt              DateTime @default(now())
+}
+
+// ---------- 调整单与流水 ----------
+
+model Adjustment {
+  id         String           @id @default(cuid())
+  disputeId  String
+  dispute    Dispute          @relation(fields: [disputeId], references: [id])
+  billId     String // 被异议的账单
+  receiptNo  String           @unique // 幂等键：同一回执只能生成一次调整
+  reason     String
+  totalDelta Float // 各账期差额合计（正=净补收，负=净退款）
+  createdAt  DateTime         @default(now())
+  lines      AdjustmentLine[]
+}
+
+model AdjustmentLine {
+  id           String       @id @default(cuid())
+  adjustmentId String
+  adjustment   Adjustment   @relation(fields: [adjustmentId], references: [id])
+  billId       String
+  bill         Bill         @relation(fields: [billId], references: [id])
+  period       String
+  prevUsage    Int
+  newUsage     Int
+  prevAmount   Float
+  newAmount    Float
+  delta        Float // newAmount - prevAmount；>0 补收，<0 退款
+  ledgerEntry  LedgerEntry?
+}
+
+model LedgerEntry {
+  id               String         @id @default(cuid())
+  residentId       String
+  resident         Resident       @relation(fields: [residentId], references: [id])
+  billId           String
+  bill             Bill           @relation(fields: [billId], references: [id])
+  adjustmentLineId String         @unique
+  adjustmentLine   AdjustmentLine @relation(fields: [adjustmentLineId], references: [id])
+  period           String
+  type             String // SURCHARGE 补收 | REFUND 退款
+  amount           Float // 正数
+  createdAt        DateTime       @default(now())
+
+  @@index([residentId])
+}
+
+model Notification {
+  id         String   @id @default(cuid())
+  residentId String
+  resident   Resident @relation(fields: [residentId], references: [id])
+  message    String
+  isRead     Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  @@index([residentId])
+}

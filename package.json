@@ -1,0 +1,15 @@
+{
+  "name": "gas-bill-dispute-system",
+  "version": "1.0.0",
+  "private": true,
+  "description": "居民燃气费账单异议与用量复核系统（NestJS + React + Prisma + SQLite）",
+  "workspaces": [
+    "server",
+    "client"
+  ],
+  "scripts": {
+    "start": "node scripts/start.js",
+    "test": "npm --workspace server run test",
+    "build": "npm --workspace client run build"
+  }
+}
