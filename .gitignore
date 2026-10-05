@@ -1,15 +1,15 @@
+# SQLite 数据库（本地开发）
+*.db
+*.db-journal
+packages/server/storage/photos/*
+!packages/server/storage/photos/.gitkeep
+
+# 构建产物
+dist/
+node_modules/
+
+# 环境变量（packages/server/.env 仅为本地开发默认值，纳入版本控制）
 .env
 .env.*
 !.env.example
-node_modules/
-.venv/
-__pycache__/
-target/
-dist/
-build/
-*.log
-.claude/
-.cc-workbench/
-轨迹/
-录屏/
-视频/
+!packages/server/.env

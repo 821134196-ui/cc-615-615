@@ -1,0 +1,20 @@
+{
+  "name": "gas-bill-review",
+  "version": "1.0.0",
+  "private": true,
+  "description": "居民燃气费账单异议与用量复核系统",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "postinstall": "npm run prisma:generate -w @gas/server",
+    "setup": "npm run db:reset -w @gas/server",
+    "dev": "concurrently -k -n server,web -c blue,green \"npm run dev -w @gas/server\" \"npm run dev -w @gas/web\"",
+    "start": "npm run dev",
+    "build": "npm run build -w @gas/server && npm run build -w @gas/web",
+    "test": "npm run test:e2e -w @gas/server"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}

@@ -1,0 +1,219 @@
+// 居民燃气费账单异议与用量复核系统 —— 数据模型
+// 注意：SQLite 不支持 Prisma enum，所有枚举字段以字符串存储，取值见 server/src/common/enums.ts
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+/// 系统用户：住户(RESIDENT) 或 客服(AGENT)
+model User {
+  id           Int      @id @default(autoincrement())
+  username     String   @unique
+  passwordHash String
+  role         String // RESIDENT | AGENT
+  displayName  String
+  createdAt    DateTime @default(now())
+
+  meter         Meter?
+  disputes      Dispute[]
+  notifications Notification[]
+  ledgerEntries LedgerEntry[]
+}
+
+/// 燃气表（一户一表）
+model Meter {
+  id      Int    @id @default(autoincrement())
+  meterNo String @unique
+  address String
+  userId  Int    @unique
+  user    User   @relation(fields: [userId], references: [id])
+
+  readings MeterReading[]
+  bills    Bill[]
+}
+
+/// 抄表照片（原始照片永久保留，不随调整删除/覆盖）
+model ReadingPhoto {
+  id               Int    @id @default(autoincrement())
+  readingId        Int?   @unique
+  reading          MeterReading? @relation(fields: [readingId], references: [id])
+  storagePath      String // 本地模拟对象存储中的相对路径
+  originalFilename String
+  contentType      String
+  sha256           String
+  createdAt        DateTime @default(now())
+}
+
+/// 抄表记录：累计读数。readingType 标明估抄(ESTIMATED)/实抄(ACTUAL)
+model MeterReading {
+  id          Int      @id @default(autoincrement())
+  meterId     Int
+  meter       Meter    @relation(fields: [meterId], references: [id])
+  periodKey   String // 账期 YYYY-MM，代表该账期期末读数
+  value       Int // 表具累计读数（立方米，单调递增）
+  readingType String // ESTIMATED | ACTUAL
+  source      String // ROUTINE 例行抄表 | ONSITE 现场复核
+  readAt      DateTime
+  /// 抄表回执编号，全局唯一；同一回执不能重复用于调整
+  receiptNo   String?  @unique
+  createdById Int?
+  photo       ReadingPhoto?
+
+  billStarts       Bill[]        @relation("BillStartReading")
+  billEnds         Bill[]        @relation("BillEndReading")
+  correctedReviews FieldReview[] @relation("CorrectedReading")
+
+  createdAt DateTime @default(now())
+
+  @@unique([meterId, periodKey, source])
+  @@index([meterId, periodKey])
+}
+
+/// 账单快照。生成后金额/用量/单价等快照字段不可变；
+/// 调整以调整单 + 流水方式体现，原账单继续保留。
+model Bill {
+  id             Int    @id @default(autoincrement())
+  meterId        Int
+  meter          Meter  @relation(fields: [meterId], references: [id])
+  periodKey      String // YYYY-MM
+  version        Int    @default(1)
+  startReadingId Int
+  endReadingId   Int
+  startReading   MeterReading @relation("BillStartReading", fields: [startReadingId], references: [id])
+  endReading     MeterReading @relation("BillEndReading", fields: [endReadingId], references: [id])
+  usage          Int // 本期用量（立方米）
+  unitPrice      Int // 单价（分/立方米）
+  amount         Int // 原账单金额（分）
+  status         String @default("ORIGINAL") // ORIGINAL | ADJUSTED
+  createdAt      DateTime @default(now())
+
+  disputes        Dispute[]
+  adjustmentLines AdjustmentLine[]
+  ledgerEntries   LedgerEntry[]
+
+  @@unique([meterId, periodKey, version])
+  @@index([meterId, periodKey])
+}
+
+/// 异议申请（按账期提交）
+model Dispute {
+  id          Int      @id @default(autoincrement())
+  billId      Int
+  bill        Bill     @relation(fields: [billId], references: [id])
+  residentId  Int
+  resident    User     @relation(fields: [residentId], references: [id])
+  reason      String
+  /// SUBMITTED 已提交
+  /// SCHEDULED 已安排现场复核
+  /// REVIEWED  复核完成（无误，或有误且调整单已处理）
+  /// DISPUTED_AGAIN 住户对结论仍有异议
+  /// RESOLVED  住户确认结论
+  /// CLOSED    已关闭
+  status      String   @default("SUBMITTED")
+  residentNote       String?
+  residentDecidedAt  DateTime?
+  closedAt     DateTime?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  reviews    FieldReview[]
+  adjustment Adjustment?
+
+  @@index([residentId])
+  @@index([billId])
+}
+
+/// 现场复核记录
+model FieldReview {
+  id          Int      @id @default(autoincrement())
+  disputeId   Int
+  dispute     Dispute  @relation(fields: [disputeId], references: [id])
+  agentId     Int
+  scheduledAt DateTime
+  completedAt DateTime?
+  /// 复核现场确认的期末累计读数（实抄）
+  correctedReadingId Int?
+  correctedReading   MeterReading? @relation("CorrectedReading", fields: [correctedReadingId], references: [id])
+  /// NO_ERROR 读数无误 | ERROR_FOUND 读数有误
+  result      String?
+  note        String?
+  /// 复核回执编号（同步写入实抄记录 receiptNo），调整单据此幂等
+  receiptNo   String?  @unique
+  createdAt   DateTime @default(now())
+
+  adjustment Adjustment?
+
+  @@index([disputeId])
+}
+
+/// 调整单：一次现场复核回执至多生成一张调整单
+model Adjustment {
+  id            Int      @id @default(autoincrement())
+  disputeId     Int      @unique
+  dispute       Dispute  @relation(fields: [disputeId], references: [id])
+  fieldReviewId Int      @unique
+  fieldReview   FieldReview @relation(fields: [fieldReviewId], references: [id])
+  /// 触发调整的抄表/复核回执，全局唯一，重复回执拒绝再次调整
+  receiptNo     String   @unique
+  reason        String
+  status        String @default("PROPOSED") // PROPOSED | APPLIED | REJECTED
+  totalDelta    Int // 所有补退行合计（分），正补收/负退款
+  appliedAt     DateTime?
+  createdAt     DateTime @default(now())
+
+  lines AdjustmentLine[]
+}
+
+/// 调整单行：跨期时按账期分别生成补收(SURCHARGE)/退款(REFUND)行
+model AdjustmentLine {
+  id           Int    @id @default(autoincrement())
+  adjustmentId Int
+  adjustment   Adjustment @relation(fields: [adjustmentId], references: [id], onDelete: Cascade)
+  billId       Int
+  bill         Bill   @relation(fields: [billId], references: [id])
+  periodKey    String
+  kind         String // SURCHARGE 补收 | REFUND 退款
+  deltaUsage   Int // 有符号用量差（立方米）
+  deltaAmount  Int // 有符号金额差（分）：补收为正，退款为负
+  createdAt    DateTime @default(now())
+
+  ledgerEntry LedgerEntry?
+
+  @@unique([adjustmentId, billId])
+}
+
+/// 资金/费用流水：补收、退款分别记账，永不删改
+model LedgerEntry {
+  id               Int      @id @default(autoincrement())
+  residentId       Int
+  resident         User     @relation(fields: [residentId], references: [id])
+  billId           Int?
+  bill             Bill?    @relation(fields: [billId], references: [id])
+  adjustmentLineId Int?     @unique
+  adjustmentLine   AdjustmentLine? @relation(fields: [adjustmentLineId], references: [id])
+  periodKey        String
+  type             String // CHARGE 原账单扣费 | SURCHARGE 跨期补收 | REFUND 退款
+  amount           Int // 有符号金额（分）：补收/扣费为正，退款为负
+  idempotencyKey   String   @unique
+  createdAt        DateTime @default(now())
+
+  @@index([residentId, periodKey])
+}
+
+/// 站内通知（由本地模拟通知接口写入）
+model Notification {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  user      User     @relation(fields: [userId], references: [id])
+  type      String // DISPUTE_RECEIVED | REVIEW_SCHEDULED | REVIEW_DONE | ADJUSTMENT_APPLIED | DISPUTE_CLOSED
+  title     String
+  body      String
+  readAt    DateTime?
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
